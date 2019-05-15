@@ -6,6 +6,10 @@ Package bess_pb is a generated protocol buffer package.
 
 It is generated from these files:
 	bess_msg.proto
+	error.proto
+	module_msg.proto
+	service.proto
+	util_msg.proto
 
 It has these top-level messages:
 	EmptyRequest
@@ -71,12 +75,108 @@ It has these top-level messages:
 	ConfigureResumeHookRequest
 	PauseWorkerRequest
 	ResumeWorkerRequest
+	Error
+	EmptyArg
+	BPFCommandClearArg
+	ExactMatchCommandAddArg
+	ExactMatchCommandDeleteArg
+	ExactMatchCommandClearArg
+	ExactMatchCommandSetDefaultGateArg
+	FlowGenCommandSetBurstArg
+	HashLBCommandSetModeArg
+	HashLBCommandSetGatesArg
+	IPLookupCommandAddArg
+	IPLookupCommandDeleteArg
+	IPLookupCommandClearArg
+	L2ForwardCommandAddArg
+	L2ForwardCommandDeleteArg
+	L2ForwardCommandSetDefaultGateArg
+	L2ForwardCommandLookupArg
+	L2ForwardCommandLookupResponse
+	L2ForwardCommandPopulateArg
+	MeasureCommandGetSummaryArg
+	MeasureCommandGetSummaryResponse
+	DRRArg
+	DRRQuantumArg
+	DRRMaxFlowQueueSizeArg
+	PortIncCommandSetBurstArg
+	QueueIncCommandSetBurstArg
+	QueueCommandSetBurstArg
+	QueueCommandSetSizeArg
+	QueueCommandGetStatusArg
+	QueueCommandGetStatusResponse
+	RandomUpdateCommandClearArg
+	RewriteCommandClearArg
+	UpdateCommandClearArg
+	WildcardMatchCommandAddArg
+	WildcardMatchCommandDeleteArg
+	WildcardMatchCommandClearArg
+	WildcardMatchCommandSetDefaultGateArg
+	ACLArg
+	BPFArg
+	BufferArg
+	BypassArg
+	DumpArg
+	EtherEncapArg
+	ExactMatchArg
+	ExactMatchConfig
+	FlowGenArg
+	GenericDecapArg
+	GenericEncapArg
+	HashLBArg
+	IPEncapArg
+	IPLookupArg
+	L2ForwardArg
+	MACSwapArg
+	MeasureArg
+	MergeArg
+	MetadataTestArg
+	NATArg
+	StaticNATArg
+	NoOpArg
+	PortIncArg
+	PortOutArg
+	QueueIncArg
+	QueueOutArg
+	QueueArg
+	RandomSplitArg
+	RandomSplitCommandSetDroprateArg
+	RandomSplitCommandSetGatesArg
+	RandomUpdateArg
+	RewriteArg
+	RoundRobinCommandSetGatesArg
+	RoundRobinCommandSetModeArg
+	RoundRobinArg
+	ReplicateArg
+	ReplicateCommandSetGatesArg
+	SetMetadataArg
+	SinkArg
+	SourceCommandSetBurstArg
+	SourceCommandSetPktSizeArg
+	SourceArg
+	SplitArg
+	TimestampArg
+	UpdateArg
+	UrlFilterArg
+	UrlFilterConfig
+	VLANPopArg
+	VLANPushArg
+	VLANSplitArg
+	VXLANDecapArg
+	VXLANEncapArg
+	WildcardMatchArg
+	WildcardMatchConfig
+	ArpResponderArg
+	MplsPopArg
+	WorkerSplitArg
+	Field
+	FieldData
 */
 package bess_pb
 
-import "github.com/golang/protobuf/proto"
-import "fmt"
-import "math"
+import proto "github.com/golang/protobuf/proto"
+import fmt "fmt"
+import math "math"
 import google_protobuf "github.com/golang/protobuf/ptypes/any"
 
 // Reference imports to suppress errors if they are not otherwise used.
@@ -118,7 +218,7 @@ func (m *EmptyResponse) GetError() *Error {
 
 type VersionResponse struct {
 	Error   *Error `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
-	Version string          `protobuf:"bytes,2,opt,name=version" json:"version,omitempty"`
+	Version string `protobuf:"bytes,2,opt,name=version" json:"version,omitempty"`
 }
 
 func (m *VersionResponse) Reset()                    { *m = VersionResponse{} }
@@ -173,8 +273,8 @@ func (m *UnloadPluginRequest) GetPath() string {
 }
 
 type ListPluginsResponse struct {
-	Error *Error `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
-	Paths []string        `protobuf:"bytes,2,rep,name=paths" json:"paths,omitempty"`
+	Error *Error   `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
+	Paths []string `protobuf:"bytes,2,rep,name=paths" json:"paths,omitempty"`
 }
 
 func (m *ListPluginsResponse) Reset()                    { *m = ListPluginsResponse{} }
@@ -197,7 +297,7 @@ func (m *ListPluginsResponse) GetPaths() []string {
 }
 
 type ListWorkersResponse struct {
-	Error         *Error                     `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
+	Error         *Error                              `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
 	WorkersStatus []*ListWorkersResponse_WorkerStatus `protobuf:"bytes,2,rep,name=workers_status,json=workersStatus" json:"workers_status,omitempty"`
 }
 
@@ -540,7 +640,7 @@ func (m *ListTcsRequest) GetWid() int64 {
 }
 
 type ListTcsResponse struct {
-	Error         *Error                       `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
+	Error         *Error                                `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
 	ClassesStatus []*ListTcsResponse_TrafficClassStatus `protobuf:"bytes,2,rep,name=classes_status,json=classesStatus" json:"classes_status,omitempty"`
 }
 
@@ -590,7 +690,7 @@ func (m *ListTcsResponse_TrafficClassStatus) GetParent() string {
 }
 
 type CheckSchedulingConstraintsResponse struct {
-	Error      *Error                                       `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
+	Error      *Error                                                `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
 	Fatal      bool                                                  `protobuf:"varint,2,opt,name=fatal" json:"fatal,omitempty"`
 	Violations []*CheckSchedulingConstraintsResponse_ViolatingClass  `protobuf:"bytes,3,rep,name=violations" json:"violations,omitempty"`
 	Modules    []*CheckSchedulingConstraintsResponse_ViolatingModule `protobuf:"bytes,4,rep,name=modules" json:"modules,omitempty"`
@@ -764,8 +864,8 @@ func (m *GetTcStatsRequest) GetName() string {
 }
 
 type GetTcStatsResponse struct {
-	Error     *Error `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
-	Timestamp float64         `protobuf:"fixed64,2,opt,name=timestamp" json:"timestamp,omitempty"`
+	Error     *Error  `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
+	Timestamp float64 `protobuf:"fixed64,2,opt,name=timestamp" json:"timestamp,omitempty"`
 	// / THe following counters represent the total amount of accumulated resource
 	// / usage of a module since its creation.
 	Count   uint64 `protobuf:"varint,3,opt,name=count" json:"count,omitempty"`
@@ -822,8 +922,8 @@ func (m *GetTcStatsResponse) GetBits() uint64 {
 }
 
 type ListDriversResponse struct {
-	Error       *Error `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
-	DriverNames []string        `protobuf:"bytes,2,rep,name=driver_names,json=driverNames" json:"driver_names,omitempty"`
+	Error       *Error   `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
+	DriverNames []string `protobuf:"bytes,2,rep,name=driver_names,json=driverNames" json:"driver_names,omitempty"`
 }
 
 func (m *ListDriversResponse) Reset()                    { *m = ListDriversResponse{} }
@@ -862,10 +962,10 @@ func (m *GetDriverInfoRequest) GetDriverName() string {
 }
 
 type GetDriverInfoResponse struct {
-	Error    *Error `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
-	Name     string          `protobuf:"bytes,2,opt,name=name" json:"name,omitempty"`
-	Help     string          `protobuf:"bytes,3,opt,name=help" json:"help,omitempty"`
-	Commands []string        `protobuf:"bytes,4,rep,name=commands" json:"commands,omitempty"`
+	Error    *Error   `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
+	Name     string   `protobuf:"bytes,2,opt,name=name" json:"name,omitempty"`
+	Help     string   `protobuf:"bytes,3,opt,name=help" json:"help,omitempty"`
+	Commands []string `protobuf:"bytes,4,rep,name=commands" json:"commands,omitempty"`
 }
 
 func (m *GetDriverInfoResponse) Reset()                    { *m = GetDriverInfoResponse{} }
@@ -902,7 +1002,7 @@ func (m *GetDriverInfoResponse) GetCommands() []string {
 }
 
 type ListPortsResponse struct {
-	Error *Error           `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
+	Error *Error                    `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
 	Ports []*ListPortsResponse_Port `protobuf:"bytes,2,rep,name=ports" json:"ports,omitempty"`
 }
 
@@ -1111,8 +1211,8 @@ func (m *GetPortConfRequest) GetName() string {
 }
 
 type GetPortConfResponse struct {
-	Error *Error `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
-	Conf  *PortConf       `protobuf:"bytes,2,opt,name=conf" json:"conf,omitempty"`
+	Error *Error    `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
+	Conf  *PortConf `protobuf:"bytes,2,opt,name=conf" json:"conf,omitempty"`
 }
 
 func (m *GetPortConfResponse) Reset()                    { *m = GetPortConfResponse{} }
@@ -1136,8 +1236,8 @@ func (m *GetPortConfResponse) GetConf() *PortConf {
 
 type CreatePortResponse struct {
 	Error   *Error `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
-	Name    string          `protobuf:"bytes,2,opt,name=name" json:"name,omitempty"`
-	MacAddr string          `protobuf:"bytes,3,opt,name=mac_addr,json=macAddr" json:"mac_addr,omitempty"`
+	Name    string `protobuf:"bytes,2,opt,name=name" json:"name,omitempty"`
+	MacAddr string `protobuf:"bytes,3,opt,name=mac_addr,json=macAddr" json:"mac_addr,omitempty"`
 }
 
 func (m *CreatePortResponse) Reset()                    { *m = CreatePortResponse{} }
@@ -1199,7 +1299,7 @@ func (m *GetPortStatsRequest) GetName() string {
 }
 
 type GetPortStatsResponse struct {
-	Error     *Error            `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
+	Error     *Error                     `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
 	Inc       *GetPortStatsResponse_Stat `protobuf:"bytes,2,opt,name=inc" json:"inc,omitempty"`
 	Out       *GetPortStatsResponse_Stat `protobuf:"bytes,3,opt,name=out" json:"out,omitempty"`
 	Timestamp float64                    `protobuf:"fixed64,4,opt,name=timestamp" json:"timestamp,omitempty"`
@@ -1326,10 +1426,10 @@ func (m *GetLinkStatusRequest) GetName() string {
 
 type GetLinkStatusResponse struct {
 	Error      *Error `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
-	Speed      uint32          `protobuf:"varint,2,opt,name=speed" json:"speed,omitempty"`
-	FullDuplex bool            `protobuf:"varint,3,opt,name=full_duplex,json=fullDuplex" json:"full_duplex,omitempty"`
-	Autoneg    bool            `protobuf:"varint,4,opt,name=autoneg" json:"autoneg,omitempty"`
-	LinkUp     bool            `protobuf:"varint,5,opt,name=link_up,json=linkUp" json:"link_up,omitempty"`
+	Speed      uint32 `protobuf:"varint,2,opt,name=speed" json:"speed,omitempty"`
+	FullDuplex bool   `protobuf:"varint,3,opt,name=full_duplex,json=fullDuplex" json:"full_duplex,omitempty"`
+	Autoneg    bool   `protobuf:"varint,4,opt,name=autoneg" json:"autoneg,omitempty"`
+	LinkUp     bool   `protobuf:"varint,5,opt,name=link_up,json=linkUp" json:"link_up,omitempty"`
 }
 
 func (m *GetLinkStatusResponse) Reset()                    { *m = GetLinkStatusResponse{} }
@@ -1373,8 +1473,8 @@ func (m *GetLinkStatusResponse) GetLinkUp() bool {
 }
 
 type ListMclassResponse struct {
-	Error *Error `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
-	Names []string        `protobuf:"bytes,2,rep,name=names" json:"names,omitempty"`
+	Error *Error   `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
+	Names []string `protobuf:"bytes,2,rep,name=names" json:"names,omitempty"`
 }
 
 func (m *ListMclassResponse) Reset()                    { *m = ListMclassResponse{} }
@@ -1413,11 +1513,11 @@ func (m *GetMclassInfoRequest) GetName() string {
 }
 
 type GetMclassInfoResponse struct {
-	Error   *Error `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
-	Name    string          `protobuf:"bytes,2,opt,name=name" json:"name,omitempty"`
-	Help    string          `protobuf:"bytes,3,opt,name=help" json:"help,omitempty"`
-	Cmds    []string        `protobuf:"bytes,4,rep,name=cmds" json:"cmds,omitempty"`
-	CmdArgs []string        `protobuf:"bytes,5,rep,name=cmd_args,json=cmdArgs" json:"cmd_args,omitempty"`
+	Error   *Error   `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
+	Name    string   `protobuf:"bytes,2,opt,name=name" json:"name,omitempty"`
+	Help    string   `protobuf:"bytes,3,opt,name=help" json:"help,omitempty"`
+	Cmds    []string `protobuf:"bytes,4,rep,name=cmds" json:"cmds,omitempty"`
+	CmdArgs []string `protobuf:"bytes,5,rep,name=cmd_args,json=cmdArgs" json:"cmd_args,omitempty"`
 }
 
 func (m *GetMclassInfoResponse) Reset()                    { *m = GetMclassInfoResponse{} }
@@ -1461,7 +1561,7 @@ func (m *GetMclassInfoResponse) GetCmdArgs() []string {
 }
 
 type ListModulesResponse struct {
-	Error   *Error               `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
+	Error   *Error                        `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
 	Modules []*ListModulesResponse_Module `protobuf:"bytes,2,rep,name=modules" json:"modules,omitempty"`
 }
 
@@ -1556,7 +1656,7 @@ func (m *CreateModuleRequest) GetArg() *google_protobuf.Any {
 
 type CreateModuleResponse struct {
 	Error *Error `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
-	Name  string          `protobuf:"bytes,2,opt,name=name" json:"name,omitempty"`
+	Name  string `protobuf:"bytes,2,opt,name=name" json:"name,omitempty"`
 }
 
 func (m *CreateModuleResponse) Reset()                    { *m = CreateModuleResponse{} }
@@ -1611,7 +1711,7 @@ func (m *GetModuleInfoRequest) GetName() string {
 }
 
 type GetModuleInfoResponse struct {
-	Error    *Error                    `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
+	Error    *Error                             `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
 	Name     string                             `protobuf:"bytes,2,opt,name=name" json:"name,omitempty"`
 	Mclass   string                             `protobuf:"bytes,3,opt,name=mclass" json:"mclass,omitempty"`
 	Desc     string                             `protobuf:"bytes,4,opt,name=desc" json:"desc,omitempty"`
@@ -2091,8 +2191,8 @@ func (m *DumpMempoolRequest) GetSocket() int32 {
 }
 
 type DumpMempoolResponse struct {
-	Error *Error `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
-	Dumps []*MempoolDump  `protobuf:"bytes,2,rep,name=dumps" json:"dumps,omitempty"`
+	Error *Error         `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
+	Dumps []*MempoolDump `protobuf:"bytes,2,rep,name=dumps" json:"dumps,omitempty"`
 }
 
 func (m *DumpMempoolResponse) Reset()                    { *m = DumpMempoolResponse{} }
@@ -2147,7 +2247,7 @@ func (m *CommandRequest) GetArg() *google_protobuf.Any {
 }
 
 type CommandResponse struct {
-	Error *Error      `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
+	Error *Error               `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
 	Data  *google_protobuf.Any `protobuf:"bytes,2,opt,name=data" json:"data,omitempty"`
 }
 
@@ -2171,8 +2271,8 @@ func (m *CommandResponse) GetData() *google_protobuf.Any {
 }
 
 type ListGateHookClassResponse struct {
-	Error *Error `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
-	Names []string        `protobuf:"bytes,2,rep,name=names" json:"names,omitempty"`
+	Error *Error   `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
+	Names []string `protobuf:"bytes,2,rep,name=names" json:"names,omitempty"`
 }
 
 func (m *ListGateHookClassResponse) Reset()                    { *m = ListGateHookClassResponse{} }
@@ -2211,11 +2311,11 @@ func (m *GetGateHookClassInfoRequest) GetName() string {
 }
 
 type GetGateHookClassInfoResponse struct {
-	Error   *Error `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
-	Name    string          `protobuf:"bytes,2,opt,name=name" json:"name,omitempty"`
-	Help    string          `protobuf:"bytes,3,opt,name=help" json:"help,omitempty"`
-	Cmds    []string        `protobuf:"bytes,4,rep,name=cmds" json:"cmds,omitempty"`
-	CmdArgs []string        `protobuf:"bytes,5,rep,name=cmd_args,json=cmdArgs" json:"cmd_args,omitempty"`
+	Error   *Error   `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
+	Name    string   `protobuf:"bytes,2,opt,name=name" json:"name,omitempty"`
+	Help    string   `protobuf:"bytes,3,opt,name=help" json:"help,omitempty"`
+	Cmds    []string `protobuf:"bytes,4,rep,name=cmds" json:"cmds,omitempty"`
+	CmdArgs []string `protobuf:"bytes,5,rep,name=cmd_args,json=cmdArgs" json:"cmd_args,omitempty"`
 }
 
 func (m *GetGateHookClassInfoResponse) Reset()                    { *m = GetGateHookClassInfoResponse{} }
@@ -2530,7 +2630,7 @@ func (m *ConfigureGateHookRequest) GetEnable() bool {
 
 type ConfigureGateHookResponse struct {
 	Error *Error `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
-	Name  string          `protobuf:"bytes,2,opt,name=name" json:"name,omitempty"`
+	Name  string `protobuf:"bytes,2,opt,name=name" json:"name,omitempty"`
 }
 
 func (m *ConfigureGateHookResponse) Reset()                    { *m = ConfigureGateHookResponse{} }
@@ -2553,7 +2653,7 @@ func (m *ConfigureGateHookResponse) GetName() string {
 }
 
 type ListGateHooksResponse struct {
-	Error *Error `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
+	Error *Error          `protobuf:"bytes,1,opt,name=error" json:"error,omitempty"`
 	Hooks []*GateHookInfo `protobuf:"bytes,2,rep,name=hooks" json:"hooks,omitempty"`
 }
 

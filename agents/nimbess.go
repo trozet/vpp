@@ -3,9 +3,15 @@
 package main
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+
 	"github.com/golang/protobuf/ptypes"
 	"github.com/trozet/vpp/agents/bess_pb"
+	"github.com/contiv/vpp/plugins/podmanager/cni"
 
+	"github.com/go-ini/ini"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 
@@ -13,6 +19,46 @@ import (
 )
 
 const Switch = "tcam"
+const L2DriverMode = "layer2"
+
+// INI config types
+type Network struct {
+	Driver		string	`ini:"driver"`
+	MacLearn	bool	`ini:"mac_learning"`
+	TunnelMode	bool	`ini:"tunnel_mode"`
+	FIBSize		int64	`ini:"fib_size"`
+}
+
+type NimbessConfig struct {
+	BessPort    int			`ini:"bess_port"`
+	WorkerCores	[]int		`ini:"worker_cores"`
+	NICs		[]string	`ini:"pci_devices"`
+	Network
+}
+
+// CNI GRPC server
+//type cniServer struct {}
+
+
+func initConfig(cfgPath string) *NimbessConfig {
+	cfg := &NimbessConfig {
+		BessPort: 10514,
+		Network: Network{
+			Driver: L2DriverMode,
+			MacLearn: true,
+			TunnelMode: false,
+			FIBSize: 1024,
+		},
+	}
+
+	err := ini.MapTo(cfg, cfgPath)
+	if err != nil {
+		log.Warningf("Unable to parse Nimbess config file: %v\n", err)
+	} else {
+		log.Infof("Configuration parsed as: +%v", cfg)
+	}
+	return cfg
+}
 
 func initSwitch(client bess_pb.BESSControlClient, size int64) {
 	modRequest := &bess_pb.GetModuleInfoRequest{
@@ -23,9 +69,9 @@ func initSwitch(client bess_pb.BESSControlClient, size int64) {
 		log.Infof("Switch: %s already exists", Switch)
 		return
 	}
-	// todo need to enable learn mode
 	l2Args := &bess_pb.L2ForwardArg{
 		Size: size,
+		Learn: true,
 	}
 	any, err := ptypes.MarshalAny(l2Args)
 	l2module := &bess_pb.CreateModuleRequest{
@@ -42,9 +88,19 @@ func initSwitch(client bess_pb.BESSControlClient, size int64) {
 
 }
 
+
 func main() {
+	// TODO setup cmd line args for cfg file path, etc
+	// For now assume cfg file in same path as binary
+	dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
+	if err != nil {
+		log.Fatal(err)
+	}
+	configFile := filepath.Join(dir, "nimbess.ini")
+
+	nimbessConfig := initConfig(configFile)
 	log.Info("Connecting to BESS")
-	conn, err := grpc.Dial("localhost:10514", grpc.WithInsecure())
+	conn, err := grpc.Dial(fmt.Sprintf("localhost:%d", nimbessConfig.BessPort), grpc.WithInsecure())
 	if err != nil {
 		log.Fatalf("Did not connect: %v", err)
 	}
@@ -57,8 +113,12 @@ func main() {
 	}
 	log.Infof("BESS connected with version: %s\n", verResponse.Version)
 
-	log.Info("Building L2 switch")
-	initSwitch(client, 1024)
+	if nimbessConfig.Driver == L2DriverMode {
+		log.Info("Building L2 switch")
+		initSwitch(client, nimbessConfig.FIBSize)
+	} else {
+		log.Fatalf("Unsupported driver specified in configuration file: %s", nimbessConfig.Driver)
+	}
 
 
 	// Implement gRPC listener for CNI calls (can use contiv_cni.go and podmanager protos)
