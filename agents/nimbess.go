@@ -3,15 +3,16 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-
-	"github.com/golang/protobuf/ptypes"
-	"github.com/trozet/vpp/agents/bess_pb"
-	"github.com/contiv/vpp/plugins/podmanager/cni"
+	"sync"
 
 	"github.com/go-ini/ini"
+	"github.com/golang/protobuf/ptypes"
+	"github.com/trozet/vpp/agents/bess_pb"
+	"github.com/trozet/vpp/plugins/podmanager/cni"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 
@@ -37,8 +38,102 @@ type NimbessConfig struct {
 }
 
 // CNI GRPC server
-//type cniServer struct {}
+type cniServer struct {
+	client bess_pb.BESSControlClient
+	ports map[string][]string // maps bess port ids to namespaces
+	mu sync.Mutex
+}
 
+func (s *cniServer) Add(ctx context.Context, req *cni.CNIRequest) (*cni.CNIReply, error) {
+	// hardcode IP for now for testing
+	ipAddr := "40.0.0.1/24"
+
+	vportNetns := &bess_pb.VPortArg_Netns{
+		Netns: req.NetworkNamespace,
+	}
+	vportArgs := &bess_pb.VPortArg{
+		Ifname: req.InterfaceName,
+		Cpid: vportNetns,
+		IpAddrs: []string{ipAddr},
+	}
+	any, err := ptypes.MarshalAny(vportArgs)
+	if err != nil {
+		return &cni.CNIReply{}, err
+	}
+
+	portRequest := &bess_pb.CreatePortRequest{
+		Name: req.InterfaceName,
+		Driver: "vport",
+		Arg: any,
+	}
+	res, err := s.client.CreatePort(ctx, portRequest)
+	if err != nil {
+		return &cni.CNIReply{}, err
+	}
+
+	s.mu.Lock()
+	s.ports[req.NetworkNamespace] = append(s.ports[req.NetworkNamespace], req.InterfaceName)
+	s.mu.Unlock()
+	var repRes uint32 = 0
+	if res.Error != nil {
+		repRes = 1
+	}
+
+	cniIfIp := &cni.CNIReply_Interface_IP{
+		Version: cni.CNIReply_Interface_IP_IPV4,
+		Address: ipAddr,
+	}
+
+	cniIf := &cni.CNIReply_Interface{
+		Name: res.Name,
+		Mac: res.MacAddr,
+		IpAddresses: []*cni.CNIReply_Interface_IP{cniIfIp},
+	}
+
+	return &cni.CNIReply{
+		Result: repRes,
+		Error: res.Error.Errmsg,
+		Interfaces: []*cni.CNIReply_Interface{cniIf},
+	}, nil
+}
+
+func (s *cniServer) Delete(ctx context.Context, req *cni.CNIRequest) (*cni.CNIReply, error) {
+	var portIdx int
+	portReq := &bess_pb.DestroyPortRequest{
+		Name: req.InterfaceName,
+	}
+	for idx, p := range s.ports[req.NetworkNamespace] {
+		if p == req.InterfaceName {
+			portIdx = idx
+			break
+		}
+	}
+
+	if portIdx == nil {
+		return &cni.CNIReply{Error: "Port not found"}, errors.New("port not found")
+	}
+	res, err := s.client.DestroyPort(ctx, portReq)
+
+	if err != nil {
+		return &cni.CNIReply{}, err
+	}
+
+	s.mu.Lock()
+	s.ports[req.NetworkNamespace] = append(s.ports[req.NetworkNamespace][:idx],
+		s.ports[req.NetworkNamespace][idx+1:]...)
+	s.mu.Unlock()
+
+	if res.Error != nil {
+		return &cni.CNIReply{
+			Result: 1,
+			Error: res.Error.Errmsg,
+		}, nil
+	} else {
+		return &cni.CNIReply{
+			Result: 0,
+		}, nil
+	}
+}
 
 func initConfig(cfgPath string) *NimbessConfig {
 	cfg := &NimbessConfig {
@@ -123,5 +218,6 @@ func main() {
 
 	// Implement gRPC listener for CNI calls (can use contiv_cni.go and podmanager protos)
 	// Port add handler
+	
 
 }
