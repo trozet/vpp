@@ -6,7 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/containernetworking/cni/pkg/types"
+	dockerTypes "github.com/docker/docker/api/types"
+	dockerCTypes "github.com/docker/docker/api/types/container"
+	dockerNTypes "github.com/docker/docker/api/types/network"
 	docker "github.com/docker/docker/client"
+	"io"
+	"os"
+	"strings"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/trozet/vpp/plugins/podmanager/cni"
@@ -16,6 +23,7 @@ import (
 
 const containerId = "vport_test"
 const nimbessPort = 9111
+const dockerImg = "docker.io/juamorous/ubuntu-ifconfig-ping"
 
 func main() {
 	log.Info("Connecting to Nimbess")
@@ -32,10 +40,76 @@ func main() {
 
 	container, err := cli.ContainerInspect(context.Background(), containerId)
 	if err != nil {
-		log.Fatal("Please start container first!")
+		log.Info("Container does not exist. Checking docker image...")
+		imgSum, err := cli.ImageList(context.Background(), dockerTypes.ImageListOptions{All: true})
+		pull:= true
+		if err != nil {
+			pull = true
+			log.Error("Error listing images")
+		} else {
+			Loop:
+				for _, img := range imgSum {
+					for _, repoTag := range img.RepoTags{
+						if strings.Contains(repoTag, "ubuntu-ifconfig-ping") {
+							pull = false
+							break Loop
+						}
+					}
+				}
+		}
+
+		if pull == true {
+			log.Info("Pulling docker image")
+			r, err := cli.ImagePull(context.Background(), dockerImg,
+				dockerTypes.ImagePullOptions{})
+			if err != nil {
+				log.Fatalf("Error pulling docker image, %v", err)
+			} else {
+				io.Copy(os.Stdout, r)
+			}
+		} else {
+			log.Info("Docker image exists. Creating container...")
+		}
+		dConfig := &dockerCTypes.Config{
+			OpenStdin: true,
+			Image: dockerImg,
+			NetworkDisabled: false,
+			Cmd: []string{"/usr/bin/tail", "-f", "/dev/null"},
+
+		}
+		hConfig := &dockerCTypes.HostConfig{
+			NetworkMode: "none",
+
+		}
+		nConfig := &dockerNTypes.NetworkingConfig{
+			EndpointsConfig: make(map[string]*dockerNTypes.EndpointSettings),
+		}
+		_, err = cli.ContainerCreate(context.Background(), dConfig, hConfig, nConfig, containerId)
+		if err != nil {
+			log.Fatalf("Failed to create container: %v", err)
+		}
+		log.Info("Container created.")
+	}
+	container, err = cli.ContainerInspect(context.Background(), containerId)
+
+	if err != nil {
+		log.Fatalf("Container does not exist: %v", err)
 	}
 
-	log.Infof("containers: %v, err: %v", container.NetworkSettings.SandboxKey, err)
+	if !container.State.Running {
+		log.Info("Starting container...")
+		err = cli.ContainerStart(context.Background(), containerId, dockerTypes.ContainerStartOptions{})
+		if err != nil {
+			log.Fatalf("Unable to start container %s: %v", containerId, err)
+		}
+		time.Sleep(5* time.Second)
+	}
+	container, err = cli.ContainerInspect(context.Background(), containerId)
+
+	if err != nil {
+		log.Fatalf("Container does not exist: %v", err)
+	}
+	log.Infof("container namespace: %s", container.NetworkSettings.SandboxKey)
 
 	netConf := &types.NetConf{
 		Name: "testNetwork",

@@ -4,11 +4,13 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	cnitypes "github.com/containernetworking/cni/pkg/types"
@@ -43,7 +45,7 @@ type Network struct {
 }
 
 type NimbessConfig struct {
-	BessPort    int			`ini:"bess_port"`
+	BessPort	int			`ini:"bess_port"`
 	WorkerCores	[]int		`ini:"worker_cores"`
 	NICs		[]string	`ini:"pci_devices"`
 	Network
@@ -57,11 +59,11 @@ type PodID struct {
 
 // LocalPod represents a locally deployed pod (locally = on this node).
 type LocalPod struct {
-	Network			 	string
+	Network				string
 	ContainerID      	string
 	NetworkNamespace	string
-	MacAddr          	string
-	IPAddr  		 	string
+	MacAddr				string
+	IPAddr				string
 	Interface			string
 	DataPlanePort		string
 }
@@ -103,10 +105,24 @@ func (s *cniServer) Add(ctx context.Context, req *cni.CNIRequest) (*cni.CNIReply
 		return &cni.CNIReply{Result: CNI_TRY_LATER}, err
 	}
 
+	id := PodID {
+		ContainerID: req.ContainerId,
+		Network: netConf.Name,
+		Interface: req.InterfaceName,
+	}
+	_, ok := s.pods[id]
+	if ok {
+		log.Error("Pod already exists, invalid CNI ADD call")
+		return &cni.CNIReply{Result:CNI_INCOMPATIBLE}, errors.New("pod already exists, invalid CNI ADD call")
+	}
+
 	// Hardcode to Kernel veth port for now
-	// Need to make this port name unique here
+	// Need to make this port name unique here, so use short NS name and port name
+	netNsSlice := strings.Split(req.NetworkNamespace, "/")
+	netNs := netNsSlice[len(netNsSlice)-1]
+	bessPort := fmt.Sprintf("%s_%s", netNs, req.InterfaceName)
 	portRequest := &bess_pb.CreatePortRequest{
-		Name: req.InterfaceName,
+		Name: bessPort,
 		Driver: "VPort",
 		Arg: any,
 	}
@@ -116,12 +132,7 @@ func (s *cniServer) Add(ctx context.Context, req *cni.CNIRequest) (*cni.CNIReply
 		return &cni.CNIReply{Result: BESS_FAILURE, Error: res.Error.Errmsg}, err
 	}
 	log.Infof("BESS returned NAME: %s", res.Name)
-	// Fix namespace here
-	id := PodID {
-		ContainerID: res.Name,
-		Network: netConf.Name,
-		Interface: req.InterfaceName,
-	}
+
 	s.mu.Lock()
 	s.pods[id] = &LocalPod{ContainerID: req.ContainerId, NetworkNamespace: req.NetworkNamespace,
 		MacAddr: res.MacAddr, IPAddr: ipAddr, Interface: req.InterfaceName, Network: netConf.Name,
