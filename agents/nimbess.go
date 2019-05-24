@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -10,7 +11,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	podmodel "github.com/contiv/vpp/plugins/ksr/model/pod"
+	cnitypes "github.com/containernetworking/cni/pkg/types"
 	"github.com/go-ini/ini"
 	"github.com/golang/protobuf/ptypes"
 	"github.com/trozet/vpp/agents/bess_pb"
@@ -21,9 +22,17 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-const Switch = "tcam"
-const L2DriverMode = "layer2"
-const serverPort = 9111
+const (
+	Switch = "tcam"
+	L2DriverMode = "layer2"
+	serverPort = 9111
+	CNI_INCOMPATIBLE = 1
+	INVALID_NETWORK_CONFIG = 2
+	CONTAINER_NOT_EXIST = 3
+	CNI_TRY_LATER = 11
+	BESS_FAILURE = 101
+	CNI_OK = 0
+)
 
 // INI config types
 type Network struct {
@@ -40,16 +49,25 @@ type NimbessConfig struct {
 	Network
 }
 
+type PodID struct {
+	Network			string
+	ContainerID		string
+	Interface		string
+}
+
 // LocalPod represents a locally deployed pod (locally = on this node).
 type LocalPod struct {
-	ID               podmodel.ID
-	ContainerID      string
-	NetworkNamespace string
-	MacAddr          string
+	Network			 	string
+	ContainerID      	string
+	NetworkNamespace	string
+	MacAddr          	string
+	IPAddr  		 	string
+	Interface			string
+	DataPlanePort		string
 }
 
 // LocalPods is a map of port-ID -> Pod info.
-type LocalPods map[string]*LocalPod
+type LocalPods map[PodID]*LocalPod
 
 // CNI GRPC server
 type cniServer struct {
@@ -62,20 +80,31 @@ func (s *cniServer) Add(ctx context.Context, req *cni.CNIRequest) (*cni.CNIReply
 	// hardcode IP for now for testing
 	ipAddr := "40.0.0.1/24"
 
-	vportArg := &bess_pb.VPortArg_Docker{
-		Docker: req.ContainerId,
+	/* Fix CNI proto as it is not requiring a bunch of spec required fields
+	like Network name with NetworConfiguration. For now just use ExtraNwConfig string
+	and unmarshal it
+	*/
+	netConf := cnitypes.NetConf{}
+	if err := json.Unmarshal([]byte(req.ExtraNwConfig), &netConf); err != nil {
+		return &cni.CNIReply{Result: INVALID_NETWORK_CONFIG}, fmt.Errorf("failed to load netconf: %v", err)
+	}
+
+	vportArg := &bess_pb.VPortArg_Netns{
+		Netns: req.NetworkNamespace,
 	}
 	vportArgs := &bess_pb.VPortArg{
-		Ifname: "testPort",
+		Ifname: req.InterfaceName,
 		Cpid: vportArg,
 		IpAddrs: []string{ipAddr},
 	}
 	any, err := ptypes.MarshalAny(vportArgs)
 	if err != nil {
 		log.Errorf("Failure to serialize vport args: %v", vportArgs)
-		return &cni.CNIReply{}, err
+		return &cni.CNIReply{Result: CNI_TRY_LATER}, err
 	}
 
+	// Hardcode to Kernel veth port for now
+	// Need to make this port name unique here
 	portRequest := &bess_pb.CreatePortRequest{
 		Name: req.InterfaceName,
 		Driver: "VPort",
@@ -84,19 +113,22 @@ func (s *cniServer) Add(ctx context.Context, req *cni.CNIRequest) (*cni.CNIReply
 	res, err := s.client.CreatePort(ctx, portRequest)
 	if err != nil || res.Error.Errmsg != "" {
 		log.Errorf("Failure to create port with Bess: %v, %v", res, err)
-		return &cni.CNIReply{Result: 1, Error: res.Error.Errmsg}, err
+		return &cni.CNIReply{Result: BESS_FAILURE, Error: res.Error.Errmsg}, err
 	}
+	log.Infof("BESS returned NAME: %s", res.Name)
 	// Fix namespace here
-	id := podmodel.ID{
-		Name: res.Name,
-		Namespace: req.NetworkNamespace,
+	id := PodID {
+		ContainerID: res.Name,
+		Network: netConf.Name,
+		Interface: req.InterfaceName,
 	}
 	s.mu.Lock()
-	s.pods[res.Name] = &LocalPod{ID: id, ContainerID: req.ContainerId, NetworkNamespace: req.NetworkNamespace,
-		MacAddr: res.MacAddr}
+	s.pods[id] = &LocalPod{ContainerID: req.ContainerId, NetworkNamespace: req.NetworkNamespace,
+		MacAddr: res.MacAddr, IPAddr: ipAddr, Interface: req.InterfaceName, Network: netConf.Name,
+		DataPlanePort: res.Name}
 	s.mu.Unlock()
 	var repRes uint32 = 0
-	if res.Error != nil {
+	if res.Error.Errmsg != "" {
 		repRes = 1
 	}
 
@@ -119,24 +151,24 @@ func (s *cniServer) Add(ctx context.Context, req *cni.CNIRequest) (*cni.CNIReply
 }
 
 func (s *cniServer) Delete(ctx context.Context, req *cni.CNIRequest) (*cni.CNIReply, error) {
-	var port string
 
-	if req.InterfaceName != "" {
-		port = req.InterfaceName
-	} else {
-		for k, v := range s.pods {
-			if v.ContainerID == req.ContainerId {
-				port = k
-				break
-			}
-		}
+	netConf := cnitypes.NetConf{}
+	if err := json.Unmarshal([]byte(req.ExtraNwConfig), &netConf); err != nil {
+		return &cni.CNIReply{Result: INVALID_NETWORK_CONFIG}, fmt.Errorf("failed to load netconf: %v", err)
+	}
+	podId := PodID{
+		Network: netConf.Name,
+		ContainerID: req.ContainerId,
+		Interface: req.InterfaceName,
 	}
 
-	if port == "" {
+	pod, ok := s.pods[podId]
+
+	if !ok {
 		log.Warning("Could not find valid port for delete request: +%v", req)
-		return &cni.CNIReply{}, nil
+		return &cni.CNIReply{Result: CNI_OK}, nil
 	}
-
+	port := pod.DataPlanePort
 	portReq := &bess_pb.DestroyPortRequest{
 		Name: port,
 	}
@@ -147,7 +179,7 @@ func (s *cniServer) Delete(ctx context.Context, req *cni.CNIRequest) (*cni.CNIRe
 	}
 
 	s.mu.Lock()
-	delete(s.pods, port)
+	delete(s.pods, podId)
 	s.mu.Unlock()
 
 	if res.Error != nil {
