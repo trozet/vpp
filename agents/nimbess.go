@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	any2 "github.com/golang/protobuf/ptypes/any"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 
@@ -34,7 +36,15 @@ const (
 	CNI_TRY_LATER = 11
 	BESS_FAILURE = 101
 	CNI_OK = 0
+	PORT = "Port"
+	MODULE = "Module"
+	PortInc = "PortInc"
+	PortOut = "PortOut"
 )
+
+var SUPPORTED_OBJECTS = [...]string{PORT, MODULE}
+
+var TcamPortMap = make(map[string]uint64)
 
 // INI config types
 type Network struct {
@@ -83,7 +93,7 @@ func (s *cniServer) Add(ctx context.Context, req *cni.CNIRequest) (*cni.CNIReply
 	ipAddr := "40.0.0.1/24"
 
 	/* Fix CNI proto as it is not requiring a bunch of spec required fields
-	like Network name with NetworConfiguration. For now just use ExtraNwConfig string
+	like Network name with Network Configuration. For now just use ExtraNwConfig string
 	and unmarshal it
 	*/
 	netConf := cnitypes.NetConf{}
@@ -120,7 +130,7 @@ func (s *cniServer) Add(ctx context.Context, req *cni.CNIRequest) (*cni.CNIReply
 	// Need to make this port name unique here, so use short NS name and port name
 	netNsSlice := strings.Split(req.NetworkNamespace, "/")
 	netNs := netNsSlice[len(netNsSlice)-1]
-	bessPort := fmt.Sprintf("%s_%s", netNs, req.InterfaceName)
+	bessPort := fmt.Sprintf("port_%s_%s", netNs, req.InterfaceName)
 	portRequest := &bess_pb.CreatePortRequest{
 		Name: bessPort,
 		Driver: "VPort",
@@ -133,6 +143,14 @@ func (s *cniServer) Add(ctx context.Context, req *cni.CNIRequest) (*cni.CNIReply
 	}
 	log.Infof("BESS returned NAME: %s", res.Name)
 
+	// Hardcode wired to L2 TCAM for now...
+	err = wirePort(s.client, s.mu, bessPort, Switch, Switch)
+	if err != nil || res.Error.Errmsg != "" {
+		log.Errorf("Failure to wire port to pipeline with Bess: %v, %v", res, err)
+		// handle clean up and delete port
+		return &cni.CNIReply{Result: BESS_FAILURE, Error: res.Error.Errmsg}, err
+	}
+	log.Infof("Wired port %s to pipeline", bessPort)
 	s.mu.Lock()
 	s.pods[id] = &LocalPod{ContainerID: req.ContainerId, NetworkNamespace: req.NetworkNamespace,
 		MacAddr: res.MacAddr, IPAddr: ipAddr, Interface: req.InterfaceName, Network: netConf.Name,
@@ -200,7 +218,7 @@ func (s *cniServer) Delete(ctx context.Context, req *cni.CNIRequest) (*cni.CNIRe
 		}, nil
 	} else {
 		return &cni.CNIReply{
-			Result: 0,
+			Result: CNI_OK,
 		}, nil
 	}
 }
@@ -248,11 +266,153 @@ func initSwitch(client bess_pb.BESSControlClient, size int64) {
 	if err != nil || cRes.Error.GetCode() !=0 {
 		log.Fatalf("Failed to create switch: %s", cRes.Error)
 	} else {
-		log.Infof("Switch created: %s\n, %s", cRes.Name, cRes.Error)
+		log.Infof("Switch created: %s, %s", cRes.Name, cRes.Error)
 	}
 
 }
 
+/* Checks if BESS resource exists. oType is BESS object type which must be one of SUPPORTED_OBJECTS types
+ */
+func objectExists(client bess_pb.BESSControlClient, object string, oType string) (bool, error) {
+	objectSupported := false
+	for _, suppObject := range SUPPORTED_OBJECTS {
+		if oType == suppObject {
+			objectSupported = true
+			break
+		}
+	}
+
+	if !objectSupported {
+		return false, fmt.Errorf("unsupported object type: %s", oType)
+	}
+
+	moduleName := strings.Join([]string{"List", oType, "s"}, "")
+	inputs := make([]reflect.Value, 2)
+	inputs[0] = reflect.ValueOf(context.Background())
+	inputs[1] = reflect.ValueOf(&bess_pb.EmptyRequest{})
+	method := reflect.ValueOf(client).MethodByName(moduleName)
+	retVals := method.Call(inputs)
+
+	if retVals[1].Interface() != nil {
+		log.Error("Error querying for object: %s, %v", object, retVals[1].Interface().(error))
+		return false, retVals[1].Interface().(error)
+	}
+
+	resp := retVals[0]
+	respType := resp.Type()
+	switch (respType.String()) {
+	case "*bess_pb.ListModulesResponse":
+		modules := resp.Interface().(*bess_pb.ListModulesResponse).GetModules()
+		for _, module := range modules {
+			if module.Name == object {
+				return true, nil
+			}
+		}
+	case "*bess_pb.ListPortsResponse":
+		ports := resp.Interface().(*bess_pb.ListPortsResponse).GetPorts()
+		for _, port := range ports {
+			if port.Name == object {
+				return true, nil
+			}
+		}
+	}
+
+	return false, nil
+}
+
+
+//Creates PortInc/PortOut modules and connects a port RX/TX to ingress and egress modules instances
+func wirePort(client bess_pb.BESSControlClient, mutex sync.Mutex, port string, iModule string, eModule string) error {
+
+	if portExists, err := objectExists(client, port, PORT); err != nil {
+		return err
+	} else if !portExists {
+		return fmt.Errorf("port %s not found in BESS", port)
+	}
+
+	for _, modObject := range []string{iModule, eModule} {
+		if modExists, err := objectExists(client, modObject, MODULE); err != nil {
+			return err
+		} else if !modExists {
+			return fmt.Errorf("module %s not found in BESS", modObject)
+		}
+	}
+
+	// Everything exists, now create Port Ingress/Egress modules
+	for _,portType := range []string{PortInc, PortOut} {
+		var any *any2.Any
+		var portName string
+		var mErr error
+		if portType == PortInc {
+			portArgs := &bess_pb.PortIncArg{
+				Port: port,
+			}
+			portName = strings.Join([]string{port, "inc"}, "_")
+			any, mErr = ptypes.MarshalAny(portArgs)
+			if mErr != nil {
+				log.Errorf("Failure to serialize port args: %v", portArgs)
+				return mErr
+			}
+		} else {
+			portArgs := &bess_pb.PortOutArg{
+				Port: port,
+			}
+			portName = strings.Join([]string{port, "out"}, "_")
+			any, mErr = ptypes.MarshalAny(portArgs)
+			if mErr != nil {
+				log.Errorf("Failure to serialize port args: %v", portArgs)
+				return mErr
+			}
+		}
+
+		portReq := &bess_pb.CreateModuleRequest{
+			Name:   portName,
+			Mclass: portType,
+			Arg:    any,
+		}
+
+		cRes, err := client.CreateModule(context.Background(), portReq)
+		if err != nil || cRes.Error.GetCode() != 0 {
+			log.Fatalf("Failed to create port: %s", cRes.GetError().Errmsg)
+		} else {
+			log.Infof("Port created: %s\n, %s", cRes.Name, cRes.Error)
+		}
+		var gate uint64
+		var ok bool
+		// select gate to use for this port
+		mutex.Lock()
+		// check if gate assignment already exists for this port
+		if gate, ok = TcamPortMap[port]; !ok {
+			gate = uint64(len(TcamPortMap) + 1)
+		}
+		TcamPortMap[port] = gate
+		mutex.Unlock()
+
+		// Now wire to module
+		var connReq *bess_pb.ConnectModulesRequest
+		if portType == PortInc {
+			connReq = &bess_pb.ConnectModulesRequest{
+				M1: portName,
+				M2: iModule,
+				Igate: gate,
+			}
+		} else {
+			connReq = &bess_pb.ConnectModulesRequest{
+				M1: eModule,
+				M2: portName,
+				Ogate: gate,
+			}
+		}
+
+		conRes, err := client.ConnectModules(context.Background(), connReq)
+		if err != nil || conRes.Error.GetCode() != 0 {
+			log.Errorf("Failed to connect modules: %s", conRes.GetError().Errmsg)
+		} else {
+			log.Infof("Connection created via request: %v", connReq)
+		}
+	}
+	return nil
+}
 
 func main() {
 	// TODO setup cmd line args for cfg file path, etc
@@ -292,10 +452,8 @@ func main() {
 	} else {
 		log.Fatalf("Unsupported driver specified in configuration file: %s", nimbessConfig.Driver)
 	}
-
-
-	// Implement gRPC listener for CNI calls (can use contiv_cni.go and podmanager protos)
-	// Port add handler
+	// TODO(trozet) setup core workers
+	// gRPC listener for CNI calls (can use contiv_cni.go and podmanager protos)
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", serverPort))
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
