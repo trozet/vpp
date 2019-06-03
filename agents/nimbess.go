@@ -44,7 +44,10 @@ const (
 
 var SUPPORTED_OBJECTS = [...]string{PORT, MODULE}
 
+// Map of port name in BESS to gate number
 var TcamPortMap = make(map[string]uint64)
+var ipAddr = net.IP{40, 0, 0, 0}
+
 
 // INI config types
 type Network struct {
@@ -85,12 +88,12 @@ type LocalPods map[PodID]*LocalPod
 type cniServer struct {
 	client bess_pb.BESSControlClient
 	pods LocalPods
-	mu sync.Mutex
+	mu *sync.Mutex
 }
 
 func (s *cniServer) Add(ctx context.Context, req *cni.CNIRequest) (*cni.CNIReply, error) {
 	// hardcode IP for now for testing
-	ipAddr := "40.0.0.1/24"
+	ipAddr[3]++
 
 	/* Fix CNI proto as it is not requiring a bunch of spec required fields
 	like Network name with Network Configuration. For now just use ExtraNwConfig string
@@ -107,7 +110,7 @@ func (s *cniServer) Add(ctx context.Context, req *cni.CNIRequest) (*cni.CNIReply
 	vportArgs := &bess_pb.VPortArg{
 		Ifname: req.InterfaceName,
 		Cpid: vportArg,
-		IpAddrs: []string{ipAddr},
+		IpAddrs: []string{fmt.Sprintf("%s/24", ipAddr.String())},
 	}
 	any, err := ptypes.MarshalAny(vportArgs)
 	if err != nil {
@@ -136,15 +139,27 @@ func (s *cniServer) Add(ctx context.Context, req *cni.CNIRequest) (*cni.CNIReply
 		Driver: "VPort",
 		Arg: any,
 	}
+	// Lock to prevent syncTcam thread from removing port before it is in DB
+	s.mu.Lock()
 	res, err := s.client.CreatePort(ctx, portRequest)
 	if err != nil || res.Error.Errmsg != "" {
 		log.Errorf("Failure to create port with Bess: %v, %v", res, err)
+		s.mu.Unlock()
 		return &cni.CNIReply{Result: BESS_FAILURE, Error: res.Error.Errmsg}, err
 	}
 	log.Infof("BESS returned NAME: %s", res.Name)
+	var gate uint64
+	// select gate to use for this port
+	// check if gate assignment already exists for this port
+	if gate, ok = TcamPortMap[bessPort]; !ok {
+		gate = uint64(len(TcamPortMap) + 1)
+	}
+	TcamPortMap[bessPort] = gate
+	s.mu.Unlock()
 
 	// Hardcode wired to L2 TCAM for now...
 	err = wirePort(s.client, s.mu, bessPort, Switch, Switch)
+	log.Info(err)
 	if err != nil || res.Error.Errmsg != "" {
 		log.Errorf("Failure to wire port to pipeline with Bess: %v, %v", res, err)
 		// handle clean up and delete port
@@ -153,7 +168,7 @@ func (s *cniServer) Add(ctx context.Context, req *cni.CNIRequest) (*cni.CNIReply
 	log.Infof("Wired port %s to pipeline", bessPort)
 	s.mu.Lock()
 	s.pods[id] = &LocalPod{ContainerID: req.ContainerId, NetworkNamespace: req.NetworkNamespace,
-		MacAddr: res.MacAddr, IPAddr: ipAddr, Interface: req.InterfaceName, Network: netConf.Name,
+		MacAddr: res.MacAddr, IPAddr: ipAddr.String(), Interface: req.InterfaceName, Network: netConf.Name,
 		DataPlanePort: res.Name}
 	s.mu.Unlock()
 	var repRes uint32 = 0
@@ -163,7 +178,7 @@ func (s *cniServer) Add(ctx context.Context, req *cni.CNIRequest) (*cni.CNIReply
 
 	cniIfIp := &cni.CNIReply_Interface_IP{
 		Version: cni.CNIReply_Interface_IP_IPV4,
-		Address: ipAddr,
+		Address: ipAddr.String(),
 	}
 
 	cniIf := &cni.CNIReply_Interface{
@@ -241,6 +256,64 @@ func initConfig(cfgPath string) *NimbessConfig {
 		log.Infof("Configuration parsed as: +%v", cfg)
 	}
 	return cfg
+}
+
+// Finds related modules for a port
+func getPortModules(client bess_pb.BESSControlClient, port string) []*bess_pb.GetModuleInfoResponse {
+	var modules []*bess_pb.GetModuleInfoResponse
+	// port modules to check
+	ports := []string{fmt.Sprintf("%s_inc", port),fmt.Sprintf("%s_out",port)}
+	for _, pName := range ports {
+		mRes, err := client.GetModuleInfo(context.Background(), &bess_pb.GetModuleInfoRequest{Name: pName})
+		if err == nil  && mRes.GetError().GetCode() == 0 {
+			modules = append(modules, mRes)
+		}
+	}
+
+	return modules
+}
+
+// Disconnects modules that have outgoing gates and deletes them. Returns last error hit during delete.
+func deleteModules(client bess_pb.BESSControlClient, modules []*bess_pb.GetModuleInfoResponse) error {
+	var dError error
+	for _, module := range modules {
+		res, err := client.DestroyModule(context.Background(), &bess_pb.DestroyModuleRequest{Name: module.Name})
+		if err != nil {
+			dError = err
+			log.Errorf("Failed to delete module: %v", err)
+		} else if res.GetError().GetCode() != 0 {
+			dError = errors.New(res.GetError().GetErrmsg())
+			log.Errorf("Failed to delete module: %v", dError)
+		} else {
+			log.Infof("Module deleted: %s", module.Name)
+		}
+	}
+	return dError
+}
+
+func syncTcam(client bess_pb.BESSControlClient, mu *sync.Mutex) {
+	log.Info("Starting TCAM sync thread")
+	for {
+		res, err := client.ListPorts(context.Background(), &bess_pb.EmptyRequest{})
+		if err == nil && res.Error.GetCode() == 0 {
+			for _, port := range res.GetPorts() {
+				// check if port is in our database
+				mu.Lock()
+				_, ok := TcamPortMap[port.Name]
+				mu.Unlock()
+				if !ok {
+					// find  and delete modules associated with port
+					deleteModules(client, getPortModules(client, port.Name))
+					eRes, err := client.DestroyPort(context.Background(),
+						&bess_pb.DestroyPortRequest{Name: port.Name})
+					if err == nil && eRes.GetError().GetCode() == 0 {
+						log.Infof("Port %s cleaned up during sync", port.Name)
+					}
+				}
+
+			}
+		}
+	}
 }
 
 func initSwitch(client bess_pb.BESSControlClient, size int64) {
@@ -322,7 +395,7 @@ func objectExists(client bess_pb.BESSControlClient, object string, oType string)
 
 
 //Creates PortInc/PortOut modules and connects a port RX/TX to ingress and egress modules instances
-func wirePort(client bess_pb.BESSControlClient, mutex sync.Mutex, port string, iModule string, eModule string) error {
+func wirePort(client bess_pb.BESSControlClient, mutex *sync.Mutex, port string, iModule string, eModule string) error {
 
 	if portExists, err := objectExists(client, port, PORT); err != nil {
 		return err
@@ -373,21 +446,15 @@ func wirePort(client bess_pb.BESSControlClient, mutex sync.Mutex, port string, i
 
 		cRes, err := client.CreateModule(context.Background(), portReq)
 		if err != nil || cRes.Error.GetCode() != 0 {
-			log.Fatalf("Failed to create port: %s", cRes.GetError().Errmsg)
+			log.Errorf("Failed to create port: %s", cRes.GetError().Errmsg)
+			return err
 		} else {
 			log.Infof("Port created: %s\n, %s", cRes.Name, cRes.Error)
 		}
-		var gate uint64
-		var ok bool
-		// select gate to use for this port
-		mutex.Lock()
-		// check if gate assignment already exists for this port
-		if gate, ok = TcamPortMap[port]; !ok {
-			gate = uint64(len(TcamPortMap) + 1)
-		}
-		TcamPortMap[port] = gate
-		mutex.Unlock()
 
+		mutex.Lock()
+		gate := TcamPortMap[port]
+		mutex.Unlock()
 		// Now wire to module
 		var connReq *bess_pb.ConnectModulesRequest
 		if portType == PortInc {
@@ -405,8 +472,12 @@ func wirePort(client bess_pb.BESSControlClient, mutex sync.Mutex, port string, i
 		}
 
 		conRes, err := client.ConnectModules(context.Background(), connReq)
-		if err != nil || conRes.Error.GetCode() != 0 {
+		if err != nil {
+			log.Errorf("Failed to connect modules: %s", err.Error())
+			return err
+		} else if conRes.Error.GetCode() != 0  {
 			log.Errorf("Failed to connect modules: %s", conRes.GetError().Errmsg)
+			return errors.New(conRes.GetError().Errmsg)
 		} else {
 			log.Infof("Connection created via request: %v", connReq)
 		}
@@ -415,6 +486,7 @@ func wirePort(client bess_pb.BESSControlClient, mutex sync.Mutex, port string, i
 }
 
 func main() {
+	mu := &sync.Mutex{}
 	// TODO setup cmd line args for cfg file path, etc
 	// For now assume cfg file in same path as binary
 	dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
@@ -442,13 +514,14 @@ func main() {
 	client := bess_pb.NewBESSControlClient(conn)
 	verResponse, err := client.GetVersion(context.Background(), &bess_pb.EmptyRequest{})
 	if err != nil || verResponse.Error !=nil {
-		log.Fatalf("Could not get version: %v", verResponse.Error)
+		log.Fatalf("Could not get version: %v, %v", verResponse.GetError(), err)
 	}
 	log.Infof("BESS connected with version: %s", verResponse.Version)
 
 	if nimbessConfig.Driver == L2DriverMode {
 		log.Info("Building L2 switch")
 		initSwitch(client, nimbessConfig.FIBSize)
+		go syncTcam(client, mu)
 	} else {
 		log.Fatalf("Unsupported driver specified in configuration file: %s", nimbessConfig.Driver)
 	}
@@ -460,7 +533,7 @@ func main() {
 	}
 	log.Info("Starting gRPC server")
 	grpcServer := grpc.NewServer()
-	cni.RegisterRemoteCNIServer(grpcServer, &cniServer{client:client, pods: make(LocalPods)})
+	cni.RegisterRemoteCNIServer(grpcServer, &cniServer{client:client, pods: make(LocalPods), mu: mu})
 	grpcServer.Serve(lis)
 
 }

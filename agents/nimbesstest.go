@@ -21,7 +21,7 @@ import (
 	"google.golang.org/grpc"
 )
 
-const containerId = "vport_test"
+const containerName = "vport_test"
 const nimbessPort = 9111
 const dockerImg = "docker.io/juamorous/ubuntu-ifconfig-ping"
 
@@ -38,97 +38,98 @@ func main() {
 		log.Fatal(err)
 	}
 
-	container, err := cli.ContainerInspect(context.Background(), containerId)
-	if err != nil {
-		log.Info("Container does not exist. Checking docker image...")
-		imgSum, err := cli.ImageList(context.Background(), dockerTypes.ImageListOptions{All: true})
-		pull:= true
+	for i := 1; i <=2; i++ {
+		containerId := fmt.Sprintf("%s%d", containerName, i)
+		container, err := cli.ContainerInspect(context.Background(), containerId)
 		if err != nil {
-			pull = true
-			log.Error("Error listing images")
-		} else {
+			log.Info("Container does not exist. Checking docker image...")
+			imgSum, err := cli.ImageList(context.Background(), dockerTypes.ImageListOptions{All: true})
+			pull := true
+			if err != nil {
+				pull = true
+				log.Error("Error listing images")
+			} else {
 			Loop:
 				for _, img := range imgSum {
-					for _, repoTag := range img.RepoTags{
+					for _, repoTag := range img.RepoTags {
 						if strings.Contains(repoTag, "ubuntu-ifconfig-ping") {
 							pull = false
 							break Loop
 						}
 					}
 				}
-		}
-
-		if pull == true {
-			log.Info("Pulling docker image")
-			r, err := cli.ImagePull(context.Background(), dockerImg,
-				dockerTypes.ImagePullOptions{})
-			if err != nil {
-				log.Fatalf("Error pulling docker image, %v", err)
-			} else {
-				io.Copy(os.Stdout, r)
 			}
-		} else {
-			log.Info("Docker image exists. Creating container...")
-		}
-		dConfig := &dockerCTypes.Config{
-			OpenStdin: true,
-			Image: dockerImg,
-			NetworkDisabled: false,
-			Cmd: []string{"/usr/bin/tail", "-f", "/dev/null"},
 
+			if pull == true {
+				log.Info("Pulling docker image")
+				r, err := cli.ImagePull(context.Background(), dockerImg,
+					dockerTypes.ImagePullOptions{})
+				if err != nil {
+					log.Fatalf("Error pulling docker image, %v", err)
+				} else {
+					io.Copy(os.Stdout, r)
+				}
+			} else {
+				log.Info("Docker image exists. Creating container...")
+			}
+			dConfig := &dockerCTypes.Config{
+				OpenStdin:       true,
+				Image:           dockerImg,
+				NetworkDisabled: false,
+				Cmd:             []string{"/usr/bin/tail", "-f", "/dev/null"},
+			}
+			hConfig := &dockerCTypes.HostConfig{
+				NetworkMode: "none",
+			}
+			nConfig := &dockerNTypes.NetworkingConfig{
+				EndpointsConfig: make(map[string]*dockerNTypes.EndpointSettings),
+			}
+			_, err = cli.ContainerCreate(context.Background(), dConfig, hConfig, nConfig, containerId)
+			if err != nil {
+				log.Fatalf("Failed to create container: %v", err)
+			}
+			log.Info("Container created.")
 		}
-		hConfig := &dockerCTypes.HostConfig{
-			NetworkMode: "none",
+		container, err = cli.ContainerInspect(context.Background(), containerId)
 
-		}
-		nConfig := &dockerNTypes.NetworkingConfig{
-			EndpointsConfig: make(map[string]*dockerNTypes.EndpointSettings),
-		}
-		_, err = cli.ContainerCreate(context.Background(), dConfig, hConfig, nConfig, containerId)
 		if err != nil {
-			log.Fatalf("Failed to create container: %v", err)
+			log.Fatalf("Container does not exist: %v", err)
 		}
-		log.Info("Container created.")
-	}
-	container, err = cli.ContainerInspect(context.Background(), containerId)
 
-	if err != nil {
-		log.Fatalf("Container does not exist: %v", err)
-	}
+		if !container.State.Running {
+			log.Info("Starting container...")
+			err = cli.ContainerStart(context.Background(), containerId, dockerTypes.ContainerStartOptions{})
+			if err != nil {
+				log.Fatalf("Unable to start container %s: %v", containerId, err)
+			}
+			time.Sleep(5 * time.Second)
+		}
+		container, err = cli.ContainerInspect(context.Background(), containerId)
 
-	if !container.State.Running {
-		log.Info("Starting container...")
-		err = cli.ContainerStart(context.Background(), containerId, dockerTypes.ContainerStartOptions{})
 		if err != nil {
-			log.Fatalf("Unable to start container %s: %v", containerId, err)
+			log.Fatalf("Container does not exist: %v", err)
 		}
-		time.Sleep(5* time.Second)
-	}
-	container, err = cli.ContainerInspect(context.Background(), containerId)
+		log.Infof("container namespace: %s", container.NetworkSettings.SandboxKey)
 
-	if err != nil {
-		log.Fatalf("Container does not exist: %v", err)
-	}
-	log.Infof("container namespace: %s", container.NetworkSettings.SandboxKey)
+		netConf := &types.NetConf{
+			Name: "testNetwork",
+		}
+		jres, _ := json.Marshal(netConf)
+		client := cni.NewRemoteCNIClient(conn)
+		testReq := &cni.CNIRequest{
+			ContainerId:      containerId,
+			InterfaceName:    "eth0",
+			ExtraNwConfig:    string(jres),
+			NetworkNamespace: container.NetworkSettings.SandboxKey,
+		}
 
-	netConf := &types.NetConf{
-		Name: "testNetwork",
+		res, err := client.Add(context.Background(), testReq)
+		if err != nil || res.Error != "" || res.Result != 0 {
+			log.Fatalf("Port Add failed: %v, %v", res, err)
+		}
+		log.Infof("Port added!: %s", res.Interfaces)
+		log.Infof("Result is: %v", res)
 	}
-	jres, _ := json.Marshal(netConf)
-	client := cni.NewRemoteCNIClient(conn)
-	testReq := &cni.CNIRequest{
-		ContainerId: containerId,
-		InterfaceName: "eth0",
-		ExtraNwConfig: string(jres),
-		NetworkNamespace: container.NetworkSettings.SandboxKey,
-	}
-
-	res, err := client.Add(context.Background(), testReq)
-	if err != nil || res.Error !="" || res.Result !=0 {
-		log.Fatalf("Port Add failed: %v, %v", res, err)
-	}
-	log.Infof("Port added!: %s", res.Interfaces)
-
 	/*
 	dres, derr := client.Delete(context.Background(), testReq)
 	if derr != nil || dres.Error !="" || dres.Result !=0 {
