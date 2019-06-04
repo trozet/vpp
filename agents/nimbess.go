@@ -59,7 +59,7 @@ type Network struct {
 
 type NimbessConfig struct {
 	BessPort	int			`ini:"bess_port"`
-	WorkerCores	[]int		`ini:"worker_cores"`
+	WorkerCores	[]int64		`ini:"worker_cores"`
 	NICs		[]string	`ini:"pci_devices"`
 	Network
 }
@@ -159,7 +159,6 @@ func (s *cniServer) Add(ctx context.Context, req *cni.CNIRequest) (*cni.CNIReply
 
 	// Hardcode wired to L2 TCAM for now...
 	err = wirePort(s.client, s.mu, bessPort, Switch, Switch)
-	log.Info(err)
 	if err != nil || res.Error.Errmsg != "" {
 		log.Errorf("Failure to wire port to pipeline with Bess: %v, %v", res, err)
 		// handle clean up and delete port
@@ -241,6 +240,7 @@ func (s *cniServer) Delete(ctx context.Context, req *cni.CNIRequest) (*cni.CNIRe
 func initConfig(cfgPath string) *NimbessConfig {
 	cfg := &NimbessConfig {
 		BessPort: 10514,
+		WorkerCores: []int64{0},
 		Network: Network{
 			Driver: L2DriverMode,
 			MacLearn: true,
@@ -316,7 +316,7 @@ func syncTcam(client bess_pb.BESSControlClient, mu *sync.Mutex) {
 	}
 }
 
-func initSwitch(client bess_pb.BESSControlClient, size int64) {
+func initSwitch(client bess_pb.BESSControlClient, size int64, macLearn bool) {
 	modRequest := &bess_pb.GetModuleInfoRequest{
 		Name: Switch,
 	}
@@ -327,7 +327,7 @@ func initSwitch(client bess_pb.BESSControlClient, size int64) {
 	}
 	l2Args := &bess_pb.L2ForwardArg{
 		Size: size,
-		Learn: true,
+		Learn: macLearn,
 	}
 	any, err := ptypes.MarshalAny(l2Args)
 	l2module := &bess_pb.CreateModuleRequest{
@@ -342,6 +342,82 @@ func initSwitch(client bess_pb.BESSControlClient, size int64) {
 		log.Infof("Switch created: %s, %s", cRes.Name, cRes.Error)
 	}
 
+}
+
+func remove(s []int64, i int) []int64 {
+	s[i] = s[len(s)-1]
+	// We do not need to put s[i] at the end, as it will be discarded anyway
+	return s[:len(s)-1]
+}
+
+func initWorkers(client bess_pb.BESSControlClient, workerCores []int64) {
+	log.Info("Initializing worker cores")
+	res, err := client.ListWorkers(context.Background(), &bess_pb.EmptyRequest{})
+	if err != nil {
+		log.Fatalf("Unable to list workers in BESS")
+	} else if res.GetError().GetCode() != 0 {
+		log.Fatal(res.GetError().GetErrmsg())
+	}
+
+	currentWorkersList := res.GetWorkersStatus()
+	// find if existing workers match worker cores and delete them otherwise
+	for _ ,cWorker := range currentWorkersList {
+		workerExists := false
+		for idx, workerCore := range workerCores{
+			if workerCore == cWorker.GetCore() {
+				workerCores = remove(workerCores, idx)
+				workerExists = true
+				break
+			}
+		}
+		// delete unknown worker
+		if !workerExists {
+			log.Infof("Pausing and removing unknown worker %s on core: %s", cWorker.GetWid(), cWorker.GetCore())
+			client.PauseWorker(context.Background(), &bess_pb.PauseWorkerRequest{cWorker.GetWid()})
+			res , err := client.DestroyWorker(context.Background(),
+				&bess_pb.DestroyWorkerRequest{cWorker.GetWid()})
+			if err != nil {
+				log.Errorf("Error destroying worker %s", cWorker.GetWid())
+			} else if res.GetError().GetCode() != 0 {
+				log.Errorf("Error destroying worker: %s", res.GetError().GetErrmsg())
+			}
+		}
+	}
+
+	// now add remaining workers that do not exist
+	for _,newWorkerCore := range workerCores {
+		log.Infof("Adding new worker for core %d", newWorkerCore)
+		// Worker ID always matches core number
+		res, err := client.AddWorker(context.Background(),
+			&bess_pb.AddWorkerRequest{Wid:newWorkerCore, Core:newWorkerCore})
+		if err != nil {
+			log.Fatalf("Failed to add worker for core %d, %v", newWorkerCore, err)
+		} else if res.GetError().GetCode() != 0 {
+			log.Fatalf("Failed to add worker: %s", res.GetError().GetErrmsg())
+		}
+	}
+}
+
+func resumeWorkers(client bess_pb.BESSControlClient) error {
+	res, err := client.ResumeAll(context.Background(), &bess_pb.EmptyRequest{})
+	if err != nil {
+		log.Errorf("Unable to resume workers")
+		return err
+	} else if res.GetError().GetCode() != 0 {
+		return errors.New(res.GetError().GetErrmsg())
+	}
+	return nil
+}
+
+func pauseWorkers(client bess_pb.BESSControlClient) error {
+	res, err := client.PauseAll(context.Background(), &bess_pb.EmptyRequest{})
+	if err != nil {
+		log.Errorf("Unable to pause workers")
+		return err
+	} else if res.GetError().GetCode() != 0 {
+		return errors.New(res.GetError().GetErrmsg())
+	}
+	return nil
 }
 
 /* Checks if BESS resource exists. oType is BESS object type which must be one of SUPPORTED_OBJECTS types
@@ -396,6 +472,10 @@ func objectExists(client bess_pb.BESSControlClient, object string, oType string)
 
 //Creates PortInc/PortOut modules and connects a port RX/TX to ingress and egress modules instances
 func wirePort(client bess_pb.BESSControlClient, mutex *sync.Mutex, port string, iModule string, eModule string) error {
+
+	//REMOVEME(trozet) once workers are safe remove pausing
+	pauseWorkers(client)
+	defer resumeWorkers(client)
 
 	if portExists, err := objectExists(client, port, PORT); err != nil {
 		return err
@@ -518,14 +598,21 @@ func main() {
 	}
 	log.Infof("BESS connected with version: %s", verResponse.Version)
 
+	initWorkers(client, nimbessConfig.WorkerCores)
+
 	if nimbessConfig.Driver == L2DriverMode {
 		log.Info("Building L2 switch")
-		initSwitch(client, nimbessConfig.FIBSize)
+		initSwitch(client, nimbessConfig.FIBSize, nimbessConfig.MacLearn)
 		go syncTcam(client, mu)
 	} else {
 		log.Fatalf("Unsupported driver specified in configuration file: %s", nimbessConfig.Driver)
 	}
-	// TODO(trozet) setup core workers
+
+	// resume all workers after initial pipeline is setup
+	err = resumeWorkers(client)
+	if err!= nil {
+		log.Fatalf("Failed to start all workers: %v", err)
+	}
 	// gRPC listener for CNI calls (can use contiv_cni.go and podmanager protos)
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", serverPort))
 	if err != nil {
