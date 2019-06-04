@@ -89,6 +89,7 @@ type cniServer struct {
 	client bess_pb.BESSControlClient
 	pods LocalPods
 	mu *sync.Mutex
+	config *NimbessConfig
 }
 
 func (s *cniServer) Add(ctx context.Context, req *cni.CNIRequest) (*cni.CNIReply, error) {
@@ -141,13 +142,13 @@ func (s *cniServer) Add(ctx context.Context, req *cni.CNIRequest) (*cni.CNIReply
 	}
 	// Lock to prevent syncTcam thread from removing port before it is in DB
 	s.mu.Lock()
-	res, err := s.client.CreatePort(ctx, portRequest)
-	if err != nil || res.Error.Errmsg != "" {
-		log.Errorf("Failure to create port with Bess: %v, %v", res, err)
+	portRes, err := s.client.CreatePort(ctx, portRequest)
+	if err != nil || portRes.Error.Errmsg != "" {
+		log.Errorf("Failure to create port with Bess: %v, %v", portRes, err)
 		s.mu.Unlock()
-		return &cni.CNIReply{Result: BESS_FAILURE, Error: res.Error.Errmsg}, err
+		return &cni.CNIReply{Result: BESS_FAILURE, Error: portRes.Error.Errmsg}, err
 	}
-	log.Infof("BESS returned NAME: %s", res.Name)
+	log.Infof("BESS returned NAME: %s", portRes.Name)
 	var gate uint64
 	// select gate to use for this port
 	// check if gate assignment already exists for this port
@@ -159,19 +160,24 @@ func (s *cniServer) Add(ctx context.Context, req *cni.CNIRequest) (*cni.CNIReply
 
 	// Hardcode wired to L2 TCAM for now...
 	err = wirePort(s.client, s.mu, bessPort, Switch, Switch)
-	if err != nil || res.Error.Errmsg != "" {
-		log.Errorf("Failure to wire port to pipeline with Bess: %v, %v", res, err)
+	if err != nil  {
+		log.Errorf("Failure to wire port to pipeline with Bess: %v, %v", err)
 		// handle clean up and delete port
-		return &cni.CNIReply{Result: BESS_FAILURE, Error: res.Error.Errmsg}, err
+		return &cni.CNIReply{Result: BESS_FAILURE, Error: err.Error()}, err
 	}
 	log.Infof("Wired port %s to pipeline", bessPort)
+	// Update TCAM table if mac-learning disabled
+	if s.config.Driver == L2DriverMode && !s.config.MacLearn {
+		err = addL2Entry(s.client, portRes.GetMacAddr(), int64(gate))
+		if err != nil {log.Errorf("failed to add tcam entry for mac: %s, gate: %d", portRes.GetMacAddr(), gate)}
+	}
 	s.mu.Lock()
 	s.pods[id] = &LocalPod{ContainerID: req.ContainerId, NetworkNamespace: req.NetworkNamespace,
-		MacAddr: res.MacAddr, IPAddr: ipAddr.String(), Interface: req.InterfaceName, Network: netConf.Name,
-		DataPlanePort: res.Name}
+		MacAddr: portRes.MacAddr, IPAddr: ipAddr.String(), Interface: req.InterfaceName, Network: netConf.Name,
+		DataPlanePort: portRes.Name}
 	s.mu.Unlock()
 	var repRes uint32 = 0
-	if res.Error.Errmsg != "" {
+	if portRes.Error.Errmsg != "" {
 		repRes = 1
 	}
 
@@ -181,14 +187,14 @@ func (s *cniServer) Add(ctx context.Context, req *cni.CNIRequest) (*cni.CNIReply
 	}
 
 	cniIf := &cni.CNIReply_Interface{
-		Name: res.Name,
-		Mac: res.MacAddr,
+		Name: portRes.Name,
+		Mac: portRes.MacAddr,
 		IpAddresses: []*cni.CNIReply_Interface_IP{cniIfIp},
 	}
 
 	return &cni.CNIReply{
 		Result: repRes,
-		Error: res.Error.Errmsg,
+		Error: portRes.Error.Errmsg,
 		Interfaces: []*cni.CNIReply_Interface{cniIf},
 	}, nil
 }
@@ -243,7 +249,7 @@ func initConfig(cfgPath string) *NimbessConfig {
 		WorkerCores: []int64{0},
 		Network: Network{
 			Driver: L2DriverMode,
-			MacLearn: true,
+			MacLearn: false,
 			TunnelMode: false,
 			FIBSize: 1024,
 		},
@@ -256,6 +262,30 @@ func initConfig(cfgPath string) *NimbessConfig {
 		log.Infof("Configuration parsed as: +%v", cfg)
 	}
 	return cfg
+}
+
+func addL2Entry(client bess_pb.BESSControlClient, mac string, gate int64) error {
+	log.Infof("Creating L2 entry for mac: %s, gate: %d", mac, gate)
+	// REMOVEME(trozet) once workers are thread safe
+	pauseWorkers(client)
+	defer resumeWorkers(client)
+	entry := &bess_pb.L2ForwardCommandAddArg_Entry{Addr: mac, Gate: gate}
+	addArg := &bess_pb.L2ForwardCommandAddArg{Entries: []*bess_pb.L2ForwardCommandAddArg_Entry{entry}}
+	any, err := ptypes.MarshalAny(addArg)
+	if err != nil {
+		log.Errorf("Failure to serialize L2 add args: %v", addArg)
+		return err
+	}
+	cmd := &bess_pb.CommandRequest{Name: Switch, Cmd: "add",Arg: any}
+	res, err := client.ModuleCommand(context.Background(), cmd)
+	if err != nil {
+		log.Errorf("Failed to add tcam entry: %v, error: %v", entry, err)
+		return err
+	} else if res.GetError().GetCode() !=0 {
+		log.Errorf("Failed to add tcam entry, error: %s", res.GetError().GetErrmsg())
+		return errors.New(res.GetError().GetErrmsg())
+	}
+	return nil
 }
 
 // Finds related modules for a port
@@ -620,7 +650,8 @@ func main() {
 	}
 	log.Info("Starting gRPC server")
 	grpcServer := grpc.NewServer()
-	cni.RegisterRemoteCNIServer(grpcServer, &cniServer{client:client, pods: make(LocalPods), mu: mu})
+	cni.RegisterRemoteCNIServer(grpcServer, &cniServer{client:client, pods: make(LocalPods), mu: mu,
+		config: nimbessConfig})
 	grpcServer.Serve(lis)
 
 }
